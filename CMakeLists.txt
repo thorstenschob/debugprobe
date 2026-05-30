@@ -1,8 +1,26 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.2.0)
+set(toolchainVersion 13_3_Rel1)
+set(picotoolVersion 2.2.0-a4)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
+set(PICO_BOARD pico2 CACHE STRING "Board type")
 cmake_minimum_required(VERSION 3.12)
 
 set(CMAKE_BUILD_TYPE RelWithDebInfo)
 
 include(pico_sdk_import.cmake)
+
+set(DEBUG_ON_PICO 1) 
+set(PICO_BOARD pico2)  
 
 set(FREERTOS_KERNEL_PATH ${CMAKE_CURRENT_LIST_DIR}/freertos)
 include(FreeRTOS_Kernel_import.cmake)
@@ -65,7 +83,8 @@ target_compile_definitions (debugprobe PRIVATE
 	PICO_RP2040_USB_DEVICE_ENUMERATION_FIX=1
 )
 
-option (DEBUG_ON_PICO "Compile firmware for the Pico instead of Debug Probe" OFF)
+#_AN - Currently disabled, as the function is possibly conflicting with the configuration above
+#option (DEBUG_ON_PICO "Compile firmware for the Pico instead of Debug Probe" OFF)
 if (DEBUG_ON_PICO)
     target_compile_definitions (debugprobe PRIVATE
 	DEBUG_ON_PICO=1
