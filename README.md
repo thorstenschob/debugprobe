@@ -1,8 +1,8 @@
-# Debugprobe
+# Debugprobe and 3 CDC's on Pico
 
-Firmware source for the Raspberry Pi Debug Probe SWD/UART accessory. Can also be run on a Raspberry Pi Pico or Pico 2.
+Firmware source for the Raspberry Pi Debug SWD/UART as accessory to be run on a Raspberry Pi Pico or Pico 2.
 
-[Raspberry Pi Debug Probe product page](https://www.raspberrypi.com/products/debug-probe/)
+-
 
 [Raspberry Pi Pico product page](https://www.raspberrypi.com/products/raspberry-pi-pico/)
 
