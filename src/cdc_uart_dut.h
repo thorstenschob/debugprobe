@@ -23,30 +23,13 @@
  *
  */
 
-#ifndef PROBE_H_
-#define PROBE_H_
+#ifndef CDC_UART_DUT_H
+#define CDC_UART_DUT_H
 
-#if defined(PROBE_IO_RAW) || defined(PROBE_IO_SWDI)
-#include "probe.pio.h"
-#endif
+#include <stdbool.h>
 
-#if defined(PROBE_IO_OEN)
-#include "probe_oen.pio.h"
-#endif
-
-void probe_set_swclk_freq(uint freq_khz);
-
-// Bit counts in the range 1..256
-void probe_write_bits(uint bit_count, uint32_t data_byte);
-uint32_t probe_read_bits(uint bit_count);
-void probe_hiz_clocks(uint bit_count);
-
-void probe_read_mode(void);
-void probe_write_mode(void);
-
-void probe_init(void);
-void probe_deinit(void);
-void probe_assert_reset(bool state);
-int probe_reset_level(void);
+void cdc_uart_dut_thread(void *ptr);
+void cdc_uart_dut_init(void);
+bool cdc_uart_dut_task(void);
 
 #endif

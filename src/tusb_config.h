@@ -62,11 +62,16 @@
 #endif
 
 //------------- CLASS -------------//
-#define CFG_TUD_HID             1
-#define CFG_TUD_CDC             1
+#define CFG_TUD_HID             0
+#if USB_DAP_ENABLE
+#define CFG_TUD_CDC             3
+#define CFG_TUD_VENDOR          1
+#else
+#define CFG_TUD_CDC             3
+#define CFG_TUD_VENDOR          0
+#endif
 #define CFG_TUD_MSC             0
 #define CFG_TUD_MIDI            0
-#define CFG_TUD_VENDOR          1
 
 /*
  * TX bufsize (actually UART RX) is oversized because the Windows CDC-ACM

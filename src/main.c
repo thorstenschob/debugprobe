@@ -31,62 +31,79 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "hardware/structs/usb.h"
+
 #if PICO_SDK_VERSION_MAJOR >= 2
 #include "bsp/board_api.h"
 #else
 #include "bsp/board.h"
 #endif
+
 #include "tusb.h"
 
-#include "probe_config.h"
-#include "probe.h"
-#include "cdc_uart.h"
 #include "autobaud.h"
+#include "cdc_perf.h"
 #include "get_serial.h"
+#include "probe.h"
+#include "probe_config.h"
+
+#if USB_DAP_ENABLE
 #include "tusb_edpt_handler.h"
 #include "DAP.h"
-#include "hardware/structs/usb.h"
+#endif
+
+#include "cdc_uart_ate.h"
+#include "cdc_uart_dut.h"
+#include "i2c_bridge.h"
 
 // UART0 for debugprobe debug
 // UART1 for debugprobe to target device
 
-static uint8_t TxDataBuffer[CFG_TUD_HID_EP_BUFSIZE];
-static uint8_t RxDataBuffer[CFG_TUD_HID_EP_BUFSIZE];
-
 #define THREADED 1
 
-#define UART_TASK_PRIO (tskIDLE_PRIORITY + 3)
-#define TUD_TASK_PRIO  (tskIDLE_PRIORITY + 2)
-#define DAP_TASK_PRIO  (tskIDLE_PRIORITY + 1)
+#define I2C_TASK_PRIO   (tskIDLE_PRIORITY + 2)
+#define UART0_TASK_PRIO (tskIDLE_PRIORITY + 3)
+#define UART1_TASK_PRIO (tskIDLE_PRIORITY + 3)
+#define DAP_TASK_PRIO   (tskIDLE_PRIORITY + 1)
 
+#define TUD_TASK_PRIO   (tskIDLE_PRIORITY + 2)
 #define AUTOBAUD_TASK_PRIO  (tskIDLE_PRIORITY + 1)
 
-TaskHandle_t dap_taskhandle, tud_taskhandle, mon_taskhandle;
+TaskHandle_t tud_taskhandle, mon_taskhandle;
 
+TaskHandle_t dap_taskhandle;
+extern TaskHandle_t uart_dut_taskhandle;
+extern TaskHandle_t uart_ate_taskhandle;
+extern TaskHandle_t i2c_taskhandle;
+extern uint8_t const desc_ms_os_20[];
+
+#if !USB_DAP_ENABLE
 static int was_configured;
+#endif
 
 void dev_mon(void *ptr)
 {
     uint32_t sof[3];
     int i = 0;
     TickType_t wake;
+
+    (void)ptr;
+
     wake = xTaskGetTickCount();
     do {
-        /* ~5 SOF events per tick */
         xTaskDelayUntil(&wake, 100);
         if (tud_connected() && !tud_suspended()) {
             sof[i++] = usb_hw->sof_rd & USB_SOF_RD_BITS;
             i = i % 3;
         } else {
-            for (i = 0; i < 3; i++)
+            for (i = 0; i < 3; i++) {
                 sof[i] = 0;
+            }
         }
         if ((sof[0] | sof[1] | sof[2]) != 0) {
             if ((sof[0] == sof[1]) && (sof[1] == sof[2])) {
                 probe_info("Watchdog timeout! Resetting USBD\n");
-                /* uh oh, signal disconnect (implicitly resets the controller) */
                 tud_deinit(0);
-                /* Make sure the port got the message */
                 xTaskDelayUntil(&wake, 1);
                 tud_init(0);
             }
@@ -96,65 +113,154 @@ void dev_mon(void *ptr)
 
 void tud_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr)
 {
-  (void) rhport;
-  (void) eventid;
-  BaseType_t blah;
-  if (in_isr) {
-    xTaskNotifyFromISR(tud_taskhandle, 0, 0, &blah);
-  } else {
-    xTaskNotify(tud_taskhandle, 0, 0);
-  }
-}
+    BaseType_t blah;
 
-void tud_unmount_cb(void);
+    (void) rhport;
+    (void) eventid;
+
+    if (in_isr) {
+        xTaskNotifyFromISR(tud_taskhandle, 0, 0, &blah);
+    } else {
+        xTaskNotify(tud_taskhandle, 0, 0);
+    }
+}
 
 void usb_thread(void *ptr)
 {
-  uint32_t cmd;
+    uint32_t cmd;
+    TickType_t wake;
+
+    (void)ptr;
+
 #ifdef PROBE_USB_CONNECTED_LED
     gpio_init(PROBE_USB_CONNECTED_LED);
     gpio_set_dir(PROBE_USB_CONNECTED_LED, GPIO_OUT);
 #endif
-    TickType_t wake;
+
     wake = xTaskGetTickCount();
     do {
+#ifdef PROBE_TUSB_HW_Trigger
+        gpio_put(PROBE_TUSB_HW_Trigger, 1);
+#endif
         tud_task();
+        cdc_perf_periodic_dump();
+#ifdef PROBE_TUSB_HW_Trigger
+        gpio_put(PROBE_TUSB_HW_Trigger, 0);
+#endif
+
 #ifdef PROBE_USB_CONNECTED_LED
         if (!gpio_get(PROBE_USB_CONNECTED_LED) && tud_ready())
             gpio_put(PROBE_USB_CONNECTED_LED, 1);
         else
             gpio_put(PROBE_USB_CONNECTED_LED, 0);
 #endif
-        // implied bus-reset detection
-        if (!tud_connected() && was_configured)
-            tud_unmount_cb();
 
-        // If suspended or disconnected, unconditional delay for 1ms (20 ticks)
         if (tud_suspended() || !tud_connected())
             xTaskDelayUntil(&wake, 20);
-        // Go to sleep if nothing to do
         else if (!tud_task_event_ready())
-          xTaskNotifyWait(0, 0xFFFFFFFFu, &cmd, 1);
+            xTaskNotifyWait(0, 0xFFFFFFFFu, &cmd, 1);
 
     } while (1);
 }
 
-// Workaround API change in 0.13
-#if (TUSB_VERSION_MAJOR == 0) && (TUSB_VERSION_MINOR <= 12)
-#define tud_vendor_flush(x) ((void)0)
-#endif
+#if USB_DAP_ENABLE
 
-int main(void) {
-    // Declare pins in binary information
+int main(void)
+{
     bi_decl_config();
 
     board_init();
+#ifdef PROBE_TUSB_HW_Trigger
+    gpio_init(PROBE_TUSB_HW_Trigger);
+    gpio_set_dir(PROBE_TUSB_HW_Trigger, GPIO_OUT);
+#endif
+
     usb_serial_init();
-    cdc_uart_init();
+    cdc_uart_dut_init();
+#if CDC_UART_ATE_ENABLE
+    cdc_uart_ate_init();
+#endif
+    i2c_bridge_init();
     tusb_init();
     stdio_uart_init();
 
     DAP_Setup();
+
+    probe_info("Welcome to debugprobe!\n");
+
+    if (THREADED) {
+        xTaskCreate(usb_thread, "TUD", configMINIMAL_STACK_SIZE, NULL, TUD_TASK_PRIO, &tud_taskhandle);
+        xTaskCreate(cdc_uart_dut_thread, "UART_DUT", configMINIMAL_STACK_SIZE, NULL, UART1_TASK_PRIO, &uart_dut_taskhandle);
+    #if CDC_UART_ATE_ENABLE
+        xTaskCreate(cdc_uart_ate_thread, "UART_ATE", configMINIMAL_STACK_SIZE, NULL, UART0_TASK_PRIO, &uart_ate_taskhandle);
+    #endif
+        xTaskCreate(i2c_bridge_thread, "I2C", configMINIMAL_STACK_SIZE, NULL, I2C_TASK_PRIO, &i2c_taskhandle);
+        xTaskCreate(autobaud_thread, "ABR", configMINIMAL_STACK_SIZE, NULL, AUTOBAUD_TASK_PRIO, &autobaud_taskhandle);
+        xTaskCreate(dap_thread, "DAP", configMINIMAL_STACK_SIZE, NULL, DAP_TASK_PRIO, &dap_taskhandle);
+        vTaskStartScheduler();
+    }
+
+    while (!THREADED) {
+        tud_task();
+        cdc_uart_dut_task();
+    #if CDC_UART_ATE_ENABLE
+        cdc_uart_ate_task();
+    #endif
+        i2c_bridge_task();
+    }
+
+    return 0;
+}
+
+bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const * request)
+{
+    if (stage != CONTROL_STAGE_SETUP) return true;
+
+    switch (request->bmRequestType_bit.type)
+    {
+        case TUSB_REQ_TYPE_VENDOR:
+            switch (request->bRequest)
+            {
+                case 1:
+                    if (request->wIndex == 7)
+                    {
+                        uint16_t total_len;
+                        memcpy(&total_len, desc_ms_os_20 + 8, 2);
+                        return tud_control_xfer(rhport, request, (void*) desc_ms_os_20, total_len);
+                    }
+                    return false;
+                default:
+                    break;
+            }
+            break;
+        default:
+            break;
+    }
+
+    return false;
+}
+
+#else
+
+int main(void)
+{
+    bi_decl_config();
+
+    board_init();
+#ifdef PROBE_TUSB_HW_Trigger
+    gpio_init(PROBE_TUSB_HW_Trigger);
+    gpio_set_dir(PROBE_TUSB_HW_Trigger, GPIO_OUT);
+#endif
+
+    usb_serial_init();
+    cdc_uart_dut_init();
+#if CDC_UART_ATE_ENABLE
+    cdc_uart_ate_init();
+#endif
+    i2c_bridge_init();
+
+    tusb_init();
+    stdio_uart_init();
 
     probe_info("Welcome to debugprobe!\n");
 
@@ -174,151 +280,100 @@ int main(void) {
 
     while (!THREADED) {
         tud_task();
-        cdc_task();
-
-#if (PROBE_DEBUG_PROTOCOL == PROTO_DAP_V2)
-        if (tud_vendor_available()) {
-            uint32_t resp_len;
-            tud_vendor_read(RxDataBuffer, sizeof(RxDataBuffer));
-            resp_len = DAP_ProcessCommand(RxDataBuffer, TxDataBuffer);
-            tud_vendor_write(TxDataBuffer, resp_len);
-        }
+        cdc_uart_dut_task();
+#if CDC_UART_ATE_ENABLE
+        cdc_uart_ate_task();
 #endif
+        i2c_bridge_task();
     }
 
     return 0;
 }
 
-uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
-{
-  // TODO not Implemented
-  (void) itf;
-  (void) report_id;
-  (void) report_type;
-  (void) buffer;
-  (void) reqlen;
-
-  return 0;
-}
-
-void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* RxDataBuffer, uint16_t bufsize)
-{
-  uint32_t response_size = TU_MIN(CFG_TUD_HID_EP_BUFSIZE, bufsize);
-
-  // This doesn't use multiple report and report ID
-  (void) itf;
-  (void) report_id;
-  (void) report_type;
-
-  DAP_ProcessCommand(RxDataBuffer, TxDataBuffer);
-
-  tud_hid_report(0, TxDataBuffer, response_size);
-}
-
-#if (PROBE_DEBUG_PROTOCOL == PROTO_DAP_V2)
-extern uint8_t const desc_ms_os_20[];
-
-bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const * request)
-{
-  // nothing to with DATA & ACK stage
-  if (stage != CONTROL_STAGE_SETUP) return true;
-
-  switch (request->bmRequestType_bit.type)
-  {
-    case TUSB_REQ_TYPE_VENDOR:
-      switch (request->bRequest)
-      {
-        case 1:
-          if ( request->wIndex == 7 )
-          {
-            // Get Microsoft OS 2.0 compatible descriptor
-            uint16_t total_len;
-            memcpy(&total_len, desc_ms_os_20+8, 2);
-
-            return tud_control_xfer(rhport, request, (void*) desc_ms_os_20, total_len);
-          }else
-          {
-            return false;
-          }
-
-        default: break;
-      }
-    break;
-    default: break;
-  }
-
-  // stall unknown request
-  return false;
-}
-#endif
-
 void tud_suspend_cb(bool remote_wakeup_en)
 {
-  probe_info("Suspended\n");
-  /* Were we actually configured? If not, threads don't exist */
-  if (was_configured) {
-	  vTaskSuspend(uart_taskhandle);
-	  vTaskSuspend(dap_taskhandle);
-    if (autobaud_running)
-      autobaud_wait_stop();
-    vTaskSuspend(autobaud_taskhandle);
-  }
-  /* slow down clk_sys for power saving ? */
+    (void)remote_wakeup_en;
+    probe_info("Suspended\n");
+
+    if (was_configured) {
+        vTaskSuspend(uart_dut_taskhandle);
+#if CDC_UART_ATE_ENABLE
+        vTaskSuspend(uart_ate_taskhandle);
+#endif
+        vTaskSuspend(i2c_taskhandle);
+        if (autobaud_running)
+            autobaud_wait_stop();
+        vTaskSuspend(autobaud_taskhandle);
+    }
 }
 
 void tud_resume_cb(void)
 {
-  probe_info("Resumed\n");
-  if (was_configured) {
-    vTaskResume(uart_taskhandle);
-    vTaskResume(dap_taskhandle);
-    vTaskResume(autobaud_taskhandle);
-  }
+    probe_info("Resumed\n");
+    if (was_configured) {
+        vTaskResume(uart_dut_taskhandle);
+#if CDC_UART_ATE_ENABLE
+        vTaskResume(uart_ate_taskhandle);
+#endif
+        vTaskResume(i2c_taskhandle);
+        vTaskResume(autobaud_taskhandle);
+    }
 }
 
 void tud_unmount_cb(void)
 {
-  probe_info("Disconnected/reset\n");
-  vTaskSuspend(uart_taskhandle);
-  vTaskSuspend(dap_taskhandle);
-  vTaskDelete(uart_taskhandle);
-  vTaskDelete(dap_taskhandle);
-  if (autobaud_running)
-    autobaud_wait_stop();
-  vTaskSuspend(autobaud_taskhandle);
-  vTaskDelete(autobaud_taskhandle);
-  was_configured = 0;
+    probe_info("Disconnected\n");
+    vTaskSuspend(uart_dut_taskhandle);
+#if CDC_UART_ATE_ENABLE
+    vTaskSuspend(uart_ate_taskhandle);
+#endif
+    vTaskSuspend(i2c_taskhandle);
+    vTaskDelete(uart_dut_taskhandle);
+#if CDC_UART_ATE_ENABLE
+    vTaskDelete(uart_ate_taskhandle);
+#endif
+    vTaskDelete(i2c_taskhandle);
+    if (autobaud_running)
+        autobaud_wait_stop();
+    vTaskSuspend(autobaud_taskhandle);
+    vTaskDelete(autobaud_taskhandle);
+    was_configured = 0;
 }
 
 void tud_mount_cb(void)
 {
-  probe_info("Connected, Configured: %d\n", !!was_configured);
-  if (!was_configured) {
-    /* UART needs to preempt USB as if we don't, characters get lost */
-    xTaskCreate(cdc_thread, "UART", configMINIMAL_STACK_SIZE, NULL, UART_TASK_PRIO, &uart_taskhandle);
-    /* Lowest priority thread is debug - need to shuffle buffers before we can toggle swd... */
-    xTaskCreate(dap_thread, "DAP", configMINIMAL_STACK_SIZE, NULL, DAP_TASK_PRIO, &dap_taskhandle);
-    /* Autobaud detection using PIO as a frequency counter */
-    xTaskCreate(autobaud_thread, "ABR", configMINIMAL_STACK_SIZE, NULL, AUTOBAUD_TASK_PRIO, &autobaud_taskhandle);
-#if(configNUMBER_OF_CORES > 1)
-    vTaskCoreAffinitySet(autobaud_taskhandle, (1 << 1));
-    vTaskCoreAffinitySet(dap_taskhandle, (1 << 1));
-    vTaskCoreAffinitySet(uart_taskhandle, (1 << 0));
+    probe_info("Connected, Configured\n");
+    if (!was_configured) {
+        xTaskCreate(cdc_uart_dut_thread, "UART_DUT", configMINIMAL_STACK_SIZE, NULL, UART1_TASK_PRIO, &uart_dut_taskhandle);
+#if CDC_UART_ATE_ENABLE
+        xTaskCreate(cdc_uart_ate_thread, "UART_ATE", configMINIMAL_STACK_SIZE, NULL, UART0_TASK_PRIO, &uart_ate_taskhandle);
 #endif
-    was_configured = 1;
-  }
+        xTaskCreate(i2c_bridge_thread, "I2C", configMINIMAL_STACK_SIZE, NULL, I2C_TASK_PRIO, &i2c_taskhandle);
+        xTaskCreate(autobaud_thread, "ABR", configMINIMAL_STACK_SIZE, NULL, AUTOBAUD_TASK_PRIO, &autobaud_taskhandle);
+#if (configNUMBER_OF_CORES > 1)
+        vTaskCoreAffinitySet(autobaud_taskhandle, (1 << 1));
+        vTaskCoreAffinitySet(uart_dut_taskhandle, (1 << 0));
+#if CDC_UART_ATE_ENABLE
+        vTaskCoreAffinitySet(uart_ate_taskhandle, (1 << 0));
+#endif
+        vTaskCoreAffinitySet(i2c_taskhandle, (1 << 0));
+#endif
+        was_configured = 1;
+    }
 }
 
-void vApplicationTickHook (void)
+#endif
+
+void vApplicationTickHook(void)
 {
-};
+}
 
 void vApplicationStackOverflowHook(TaskHandle_t Task, char *pcTaskName)
 {
-  panic("stack overflow (not the helpful kind) for %s\n", *pcTaskName);
+    panic("stack overflow (not the helpful kind) for %s\n", *pcTaskName);
 }
 
 void vApplicationMallocFailedHook(void)
 {
-  panic("Malloc Failed\n");
-};
+    panic("Malloc Failed\n");
+}

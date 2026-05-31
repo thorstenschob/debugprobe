@@ -1,8 +1,29 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.2.0)
+set(toolchainVersion 14_2_Rel1)
+set(picotoolVersion 2.2.0-a4)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
+
 cmake_minimum_required(VERSION 3.12)
 
 set(CMAKE_BUILD_TYPE RelWithDebInfo)
 
 include(pico_sdk_import.cmake)
+set(DEBUG_ON_PICO 1) 
+if (NOT DEFINED PICO_BOARD)
+    set(PICO_BOARD "pico2" CACHE STRING "Board type")
+endif()
+
+set_property(CACHE PICO_BOARD PROPERTY STRINGS pico pico2)
 
 set(FREERTOS_KERNEL_PATH ${CMAKE_CURRENT_LIST_DIR}/freertos)
 include(FreeRTOS_Kernel_import.cmake)
@@ -11,8 +32,11 @@ project(debugprobe)
 
 pico_sdk_init()
 
+option(USB_DAP_ENABLE "Build the original CMSIS-DAP firmware variant" ON)
+option(DEBUG_ON_PICO "Compile firmware for the Pico instead of Debug Probe" ON)
+
 if (${PICO_SDK_VERSION_MAJOR} LESS 2)
-	message(SEND_ERROR "Version 2 of the Pico SDK is required to compile this project. Please update your installation at ${PICO_SDK_PATH}")
+    message(SEND_ERROR "Version 2 of the Pico SDK is required to compile this project. Please update your installation at ${PICO_SDK_PATH}")
 endif ()
 
 add_executable(debugprobe
@@ -20,24 +44,43 @@ add_executable(debugprobe
         src/main.c
         src/usb_descriptors.c
         src/probe.c
-        src/cdc_uart.c
+        src/cdc_perf.c
         src/get_serial.c
-        src/sw_dp_pio.c
-        src/tusb_edpt_handler.c
-        src/autobaud.c
 )
 
-target_sources(debugprobe PRIVATE
+if (USB_DAP_ENABLE)
+    target_compile_definitions(debugprobe PRIVATE USB_DAP_ENABLE=1)
+    target_sources(debugprobe PRIVATE
+        src/cdc_uart_dut.c
+        src/cdc_uart_ate.c
+        src/i2c_bridge.c
+        src/autobaud.c
+        src/sw_dp_pio.c
+        src/tusb_edpt_handler.c
         CMSIS_DAP/CMSIS/DAP/Firmware/Source/DAP.c
         CMSIS_DAP/CMSIS/DAP/Firmware/Source/JTAG_DP.c
         CMSIS_DAP/CMSIS/DAP/Firmware/Source/DAP_vendor.c
         CMSIS_DAP/CMSIS/DAP/Firmware/Source/SWO.c
-        #CMSIS_DAP/CMSIS/DAP/Firmware/Source/SW_DP.c
-        )
-
-target_include_directories(debugprobe PRIVATE
+    )
+    target_include_directories(debugprobe PRIVATE
         CMSIS_DAP/CMSIS/DAP/Firmware/Include/
         CMSIS_DAP/CMSIS/Core/Include/
+    )
+else()
+    target_compile_definitions(debugprobe PRIVATE USB_DAP_ENABLE=0)
+    target_sources(debugprobe PRIVATE
+        src/cdc_uart_dut.c
+        src/cdc_uart_ate.c
+        src/i2c_bridge.c
+        src/autobaud.c
+    )
+endif()
+
+if (DEBUG_ON_PICO)
+    target_compile_definitions(debugprobe PRIVATE DEBUG_ON_PICO=1)
+endif()
+
+target_include_directories(debugprobe PRIVATE
         include/
         )
 
@@ -62,25 +105,31 @@ target_include_directories(debugprobe PRIVATE
 add_dependencies(debugprobe version)
 
 target_compile_definitions (debugprobe PRIVATE
-	PICO_RP2040_USB_DEVICE_ENUMERATION_FIX=1
+    PICO_RP2040_USB_DEVICE_ENUMERATION_FIX=1
 )
 
-option (DEBUG_ON_PICO "Compile firmware for the Pico instead of Debug Probe" OFF)
-if (DEBUG_ON_PICO)
-    target_compile_definitions (debugprobe PRIVATE
-	DEBUG_ON_PICO=1
-    )
-    if (PICO_BOARD STREQUAL "pico")
+if (PICO_BOARD STREQUAL "pico")
+    if (USB_DAP_ENABLE)
         set_target_properties(debugprobe PROPERTIES
             OUTPUT_NAME "debugprobe_on_pico"
         )
-    elseif (PICO_BOARD STREQUAL "pico2")
+    else()
+        set_target_properties(debugprobe PROPERTIES
+            OUTPUT_NAME "probeCDC_on_pico"
+        )
+    endif()
+elseif (PICO_BOARD STREQUAL "pico2")
+    if (USB_DAP_ENABLE)
         set_target_properties(debugprobe PROPERTIES
             OUTPUT_NAME "debugprobe_on_pico2"
         )
-    else ()
-        message(SEND_ERROR "Unsupported board ${PICO_BOARD}")
-    endif ()
+    else()
+        set_target_properties(debugprobe PROPERTIES
+            OUTPUT_NAME "probeCDC_on_pico2"
+        )
+    endif()
+else ()
+    message(SEND_ERROR "Unsupported board ${PICO_BOARD}")
 endif ()
 
 
@@ -90,6 +139,8 @@ target_link_libraries(debugprobe PRIVATE
         pico_unique_id
         tinyusb_device
         tinyusb_board
+        hardware_i2c
+        hardware_uart
         hardware_pio
         hardware_dma
         hardware_irq

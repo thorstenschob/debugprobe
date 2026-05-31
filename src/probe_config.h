@@ -65,8 +65,13 @@ do { \
 
 // TODO tie this up with PICO_BOARD defines in the main SDK
 
-#ifdef DEBUG_ON_PICO 
+#ifndef USB_DAP_ENABLE
+#define USB_DAP_ENABLE 0
+#endif
+
+#ifdef DEBUG_ON_PICO
 #include "board_pico_config.h"
+#include "board_pico_local_config.h"
 #else
 #include "board_debug_probe_config.h"
 #endif
@@ -82,5 +87,7 @@ void bi_decl_config();
 #ifndef PROBE_DEBUG_PROTOCOL
 #define PROBE_DEBUG_PROTOCOL PROTO_DAP_V2
 #endif
+
+#include "probe_local_feature_config.h"
 
 #endif
