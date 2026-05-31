@@ -34,6 +34,8 @@ pico_sdk_init()
 
 option(USB_DAP_ENABLE "Build the original CMSIS-DAP firmware variant" ON)
 option(DEBUG_ON_PICO "Compile firmware for the Pico instead of Debug Probe" ON)
+option(CDC_PERF_ENABLE "Use the third CDC interface for perf stats instead of UART ATE bridge" OFF)
+set(CDC_PERF_AUTOPRINT_MS "1000" CACHE STRING "Perf stats print interval in milliseconds")
 
 if (${PICO_SDK_VERSION_MAJOR} LESS 2)
     message(SEND_ERROR "Version 2 of the Pico SDK is required to compile this project. Please update your installation at ${PICO_SDK_PATH}")
@@ -47,6 +49,17 @@ add_executable(debugprobe
         src/cdc_perf.c
         src/get_serial.c
 )
+
+target_compile_definitions(debugprobe PRIVATE
+    CDC_PERF_ENABLE=$<BOOL:${CDC_PERF_ENABLE}>
+    CDC_PERF_AUTOPRINT_MS=${CDC_PERF_AUTOPRINT_MS}
+)
+
+if (CDC_PERF_ENABLE)
+    target_compile_definitions(debugprobe PRIVATE CDC_UART_ATE_ENABLE=0)
+else()
+    target_compile_definitions(debugprobe PRIVATE CDC_UART_ATE_ENABLE=1)
+endif()
 
 if (USB_DAP_ENABLE)
     target_compile_definitions(debugprobe PRIVATE USB_DAP_ENABLE=1)
