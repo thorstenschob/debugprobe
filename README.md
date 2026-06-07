@@ -1,5 +1,22 @@
 # Debugprobe and 3 CDC's on Pico
 
+
+Interim solution and framework for extended functionality with additional CDCs while preserving the programming interface for openOCD. With planned functional enhancements, the existing working structure should be retained for now to make it easy to follow updates of the main branch. One modification involves disabling the CMSIS-DAP interface in order to activate only the added optional functionality. - WIP!
+- The implemented UART interfaces are a slightly stripped-down copy version of the original RB 'uart.c' version. The naming of the serial interface was initially reduced to letters to avoid duplicate numbering with 0 and 1. The acronym chosen in the end provides a clear distinction and serves as an example. ( [ATE](https://en.wikipedia.org/wiki/Automatic_test_equipment), [DUT](https://en.wikipedia.org/wiki/Device_under_test) ) - WIP
+
+
+.
+
+
+<img width="1004" height="238" alt="image" src="https://github.com/user-attachments/assets/48838bc0-2623-4559-a824-d591a9154e27" />
+
+
+
+.
+
+
+---
+
 Firmware source for the Raspberry Pi Debug SWD/UART as accessory to be run on a Raspberry Pi Pico or Pico 2.
 
 -
@@ -65,15 +82,4 @@ cmake -DDEBUG_ON_PICO=1 -DPICO_BOARD=pico2 ../
 ```
 This will build with the configuration for the Pico 2 and call the output program `debugprobe_on_pico2.uf2`.
 
-# AutoBaud
-
-Mode which automatically detects and sets the UART baud rate as data arrives.
-
-To enable AutoBaud, configure the USB CDC port to the following custom baud rate:
-```
-9728 (0x2600)
-```
-> **Note:** Some Linux serial tools cannot set custom baud values. PuTTY on Windows and any terminal that supports arbitrary baud rates works.
-
-Changing the baud rate to any other value disables AutoBaud.
-
+...
